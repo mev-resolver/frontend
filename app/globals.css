@@ -1,0 +1,84 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;600&family=Syne:wght@700;800&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --teal:   #2DD4BF;
+  --orange: #F97316;
+  --green:  #10B981;
+  --danger: #EF4444;
+  --abyss:  #0A0F1A;
+  --hull:   #111827;
+  --sonar:  #1F2937;
+  --muted:  #9CA3AF;
+  --bright: #F3F4F6;
+  --blue:   #3B82F6;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  background: var(--abyss);
+  color: var(--bright);
+  font-family: 'DM Sans', sans-serif;
+}
+
+@keyframes sonar {
+  0%   { transform: scale(0.95); opacity: 0.5; }
+  70%  { opacity: 0.15; }
+  100% { transform: scale(1.05); opacity: 0; }
+}
+
+@keyframes blink { 50% { opacity: 0; } }
+
+.sonar-ring { animation: sonar 5s ease-out infinite; }
+.blink      { animation: blink 1.2s step-end infinite; }
+
+.card {
+  background: rgba(17,24,39,0.85);
+  border: 1px solid rgba(45,212,191,0.12);
+  border-radius: 12px;
+  backdrop-filter: blur(8px);
+}
+
+.card:hover {
+  border-color: rgba(45,212,191,0.3);
+}
+
+.btn-primary {
+  background: transparent;
+  border: 1px solid var(--teal);
+  color: var(--teal);
+  font-family: 'Space Mono', monospace;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  padding: 10px 20px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-primary:hover { background: rgba(45,212,191,0.1); box-shadow: 0 0 20px rgba(45,212,191,0.2); }
+.btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.btn-danger {
+  background: transparent;
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  font-family: 'Space Mono', monospace;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  padding: 10px 20px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-danger:hover { background: rgba(239,68,68,0.1); }
+
+.mono { font-family: 'Space Mono', monospace; }
+
+scrollbar-width: thin;
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: var(--hull); }
+::-webkit-scrollbar-thumb { background: var(--sonar); border-radius: 2px; }
