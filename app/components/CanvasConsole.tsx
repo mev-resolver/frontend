@@ -26,12 +26,16 @@ const CONNECTIONS = [
 
 interface Node {
   id: string; txHash: string;
-  nodeType: 'normal'|'suspicious'|'attack';
+  nodeType: 'normal'|'suspicious'|'attack'|'protectedVictim';
   path: string[]; pathIdx: number;
   x: number; y: number;
   opacity: number; pulsePhase: number;
   trail: {x:number;y:number}[];
   alive: boolean; speed: number;
+  isBot: boolean;
+  isAttacked: boolean;
+  isVictim: boolean;
+  hasEnteredDetection: boolean;
 }
 
 interface Props {
@@ -39,58 +43,89 @@ interface Props {
   replayEvents?: WsEvent[];
   isReplay?:     boolean;
   onEventLog?:   (msg: string, type: string) => void;
+  onNodeUpdate?: (count: number, nodes: { txHash: string; stage: string; color: string }[]) => void;
 }
 
-export default function CanvasConsole({ wsUrl, replayEvents, isReplay, onEventLog }: Props) {
+export default function CanvasConsole({ wsUrl, replayEvents, isReplay, onEventLog, onNodeUpdate }: Props) {
   const canvasRef  = useRef<HTMLCanvasElement>(null);
   const nodesRef   = useRef<Map<string, Node>>(new Map());
   const animRef    = useRef<number>();
   const sonarRef   = useRef(0);
   const wsRef      = useRef<WebSocket|null>(null);
+  const attackedHashesRef = useRef<Set<string>>(new Set());
+  const victimHashRef     = useRef<string | null>(null);
 
   const zoneCenter = useCallback((key: string, W: number, H: number) => {
     const z = ZONES.find(z => z.key === key);
     return z ? { x: z.xFrac * W, y: z.yFrac * H } : { x: 0, y: 0 };
   }, []);
 
-  const spawnNode = useCallback((txHash: string, nodeType: 'normal'|'suspicious'|'attack') => {
+  const spawnNode = useCallback((txHash: string, isBot: boolean) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const W = canvas.width, H = canvas.height;
-    const path = nodeType === 'attack' ? PATHS.attack : PATHS.normal;
+    const path = PATHS.normal;
     const { x, y } = zoneCenter('mempool', W, H);
     nodesRef.current.set(txHash, {
-      id: txHash, txHash, nodeType, path, pathIdx: 0,
+      id: txHash, txHash,
+      nodeType: 'normal',
+      path, pathIdx: 0,
       x, y: y + (Math.random()-0.5)*40,
       opacity: 0, pulsePhase: Math.random()*Math.PI*2,
       trail: [], alive: true,
-      speed: 1.3 + Math.random()*0.5,
+      speed: 1.2 + Math.random()*0.6,
+      isBot,
+      isAttacked: attackedHashesRef.current.has(txHash),
+      isVictim: victimHashRef.current === txHash,
+      hasEnteredDetection: false,
     });
   }, [zoneCenter]);
 
   const handleEvent = useCallback((ev: WsEvent) => {
     if (ev.type === 'transaction_arrived') {
       const d = ev.data as Record<string,unknown>;
-      const nt: 'normal'|'suspicious'|'attack' = d.is_bot ? 'suspicious' : 'normal';
-      spawnNode(d.tx_hash as string, nt);
+      const isBot = !!d.is_bot;
+      spawnNode(d.tx_hash as string, isBot);
       onEventLog?.(`tx_arrived ${(d.tx_hash as string).slice(0,12)}... ${d.token_in}->${d.token_out}`, 'normal');
     } else if (ev.type === 'attack_detected') {
       const d = ev.data as Record<string,unknown>;
-      const node = nodesRef.current.get(d.victim_tx_hash as string);
-      if (node) node.nodeType = 'attack';
-      // Also mark bot txs
-      const buyHash = d.buy_tx_hash as string;
-      if (buyHash) {
-        const bn = nodesRef.current.get(buyHash);
-        if (bn) bn.nodeType = 'attack';
-      }
+      const victimHash = d.victim_tx_hash as string;
+      const buyHash    = d.buy_tx_hash as string;
+      const sellHash   = d.sell_tx_hash as string;
+
+      attackedHashesRef.current.add(victimHash);
+      if (buyHash) attackedHashesRef.current.add(buyHash);
+      if (sellHash) attackedHashesRef.current.add(sellHash);
+      victimHashRef.current = victimHash;
+
+      // Update existing nodes
+      [victimHash, buyHash, sellHash].forEach(hash => {
+        if (!hash) return;
+        const node = nodesRef.current.get(hash);
+        if (node) {
+          node.isAttacked = true;
+          if (hash === victimHash) node.isVictim = true;
+          if (node.hasEnteredDetection) {
+            if (hash === victimHash) {
+              node.path = PATHS.attack;
+              node.speed = 2.2;
+              node.nodeType = 'protectedVictim';
+            } else {
+              node.speed = 0.7;
+              node.nodeType = 'attack';
+            }
+          }
+        }
+      });
       onEventLog?.(`ATTACK_DETECTED ${d.attack_id} conf:${d.confidence}`, 'attack');
     } else if (ev.type === 'mitigation_applied') {
       const d = ev.data as Record<string,unknown>;
-      const node = nodesRef.current.get(d.victim_tx_hash as string);
-      if (node) {
-        node.path = PATHS.attack;
-        if (node.pathIdx >= 2) node.pathIdx = 1;
+      const victimNode = nodesRef.current.get(d.victim_tx_hash as string);
+      if (victimNode && victimNode.isVictim) {
+        victimNode.path = PATHS.attack;
+        victimNode.speed = 2.2;
+        victimNode.nodeType = 'protectedVictim';
+        if (victimNode.pathIdx >= 2) victimNode.pathIdx = 1;
       }
       onEventLog?.(`MITIGATED ${d.bundle_id} -> protected lane`, 'mitigated');
     } else if (ev.type === 'settlement_confirmed') {
@@ -99,7 +134,24 @@ export default function CanvasConsole({ wsUrl, replayEvents, isReplay, onEventLo
     }
   }, [spawnNode, onEventLog]);
 
-  // Animation loop
+  // Periodically report node updates to parent (for active nodes list)
+  useEffect(() => {
+    if (!onNodeUpdate) return;
+    const interval = setInterval(() => {
+      const nodes = Array.from(nodesRef.current.values()).map((node: Node) => {
+        let color = '#2DD4BF';
+        if (node.nodeType === 'protectedVictim') color = '#10B981';
+        else if (node.nodeType === 'attack') color = '#EF4444';
+        else if (node.nodeType === 'suspicious') color = '#F97316';
+        const stage = node.path[node.pathIdx] || 'settled';
+        return { txHash: node.txHash, stage, color };
+      });
+      onNodeUpdate(nodesRef.current.size, nodes);
+    }, 500);
+    return () => clearInterval(interval);
+  }, [onNodeUpdate]);
+
+  // Animation loop (unchanged)
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -122,13 +174,11 @@ export default function CanvasConsole({ wsUrl, replayEvents, isReplay, onEventLo
       ctx.fillStyle = '#0A0F1A';
       ctx.fillRect(0,0,W,H);
 
-      // Grid
+      // Grid & sonar
       ctx.strokeStyle = 'rgba(45,212,191,0.04)';
       ctx.lineWidth = 0.5;
       for (let x=0; x<W; x+=50) { ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke(); }
       for (let y=0; y<H; y+=50) { ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
-
-      // Sonar
       sonarRef.current += 0.008;
       const cx = W/2, cy = H/2, maxR = Math.min(W,H)*0.42;
       [0.3,0.6,0.9].forEach((f,i) => {
@@ -152,7 +202,6 @@ export default function CanvasConsole({ wsUrl, replayEvents, isReplay, onEventLo
         ctx.lineWidth = 1;
         if (tk==='public') ctx.setLineDash([5,8]); else ctx.setLineDash([]);
         ctx.stroke(); ctx.setLineDash([]);
-        // Moving particle
         const p = ((Date.now()/1100) % 1);
         const px=fx+(tx2-fx)*p, py=fy+(ty-fy)*p;
         ctx.beginPath(); ctx.arc(px,py,2,0,Math.PI*2);
@@ -175,7 +224,6 @@ export default function CanvasConsole({ wsUrl, replayEvents, isReplay, onEventLo
         ctx.lineWidth = z.isProtected ? 1.5 : 1;
         if (z.isDashed) ctx.setLineDash([5,5]); else ctx.setLineDash([]);
         ctx.strokeRect(zx,zy,z.wAbs,z.hAbs); ctx.setLineDash([]);
-
         ctx.font='8px Space Mono,monospace'; ctx.textAlign='center';
         ctx.fillStyle = z.isProtected ? '#10B981' : '#9CA3AF';
         ctx.fillText(z.label, z.xFrac*W, zy-8);
@@ -183,15 +231,46 @@ export default function CanvasConsole({ wsUrl, replayEvents, isReplay, onEventLo
 
       // Nodes
       const dead: string[] = [];
+      const detectionCenter = zoneCenter('detection', W, H);
       nodesRef.current.forEach((node, key) => {
         node.opacity = Math.min(1, node.opacity+0.05);
         node.pulsePhase += 0.09;
 
-        const color = node.nodeType==='attack' ? '#EF4444'
-          : node.nodeType==='suspicious' ? '#F97316'
-          : '#2DD4BF';
+        // Check entry into detection zone
+        if (!node.hasEnteredDetection) {
+          const distToDetection = Math.hypot(node.x - detectionCenter.x, node.y - detectionCenter.y);
+          if (distToDetection < 30) {
+            node.hasEnteredDetection = true;
+            if (node.isAttacked) {
+              if (node.isVictim) {
+                node.nodeType = 'protectedVictim';
+                node.path = PATHS.attack;
+                node.speed = 2.2;
+                if (node.pathIdx >= 2) node.pathIdx = 1;
+              } else {
+                node.nodeType = 'attack';
+                node.speed = 0.7;
+              }
+            } else {
+              node.nodeType = node.isBot ? 'suspicious' : 'normal';
+            }
+          }
+        }
 
-        if (node.nodeType!=='normal') {
+        // Determine color
+        let color = '#2DD4BF';
+        if (node.nodeType === 'protectedVictim') {
+          color = '#10B981';
+        } else if (node.nodeType === 'attack') {
+          color = '#EF4444';
+        } else if (node.nodeType === 'suspicious') {
+          color = '#F97316';
+        } else {
+          color = '#2DD4BF';
+        }
+
+        // Trail
+        if (node.nodeType !== 'normal') {
           node.trail.push({x:node.x, y:node.y});
           if (node.trail.length>10) node.trail.shift();
         }
@@ -220,21 +299,30 @@ export default function CanvasConsole({ wsUrl, replayEvents, isReplay, onEventLo
           ctx.fill();
         });
 
-        if (node.nodeType==='attack') {
+        if (node.nodeType === 'attack') {
           const gr=ctx.createRadialGradient(node.x,node.y,0,node.x,node.y,16+Math.sin(node.pulsePhase)*4);
           gr.addColorStop(0,'rgba(239,68,68,0.4)'); gr.addColorStop(1,'rgba(239,68,68,0)');
           ctx.beginPath(); ctx.arc(node.x,node.y,16,0,Math.PI*2); ctx.fillStyle=gr; ctx.fill();
+        } else if (node.nodeType === 'protectedVictim') {
+          const gr=ctx.createRadialGradient(node.x,node.y,0,node.x,node.y,12+Math.sin(node.pulsePhase)*3);
+          gr.addColorStop(0,'rgba(16,185,129,0.4)'); gr.addColorStop(1,'rgba(16,185,129,0)');
+          ctx.beginPath(); ctx.arc(node.x,node.y,14,0,Math.PI*2); ctx.fillStyle=gr; ctx.fill();
         }
 
-        const r = node.nodeType==='attack' ? 8 : 6;
+        const r = (node.nodeType === 'attack' || node.nodeType === 'protectedVictim') ? 8 : 6;
         ctx.beginPath(); ctx.arc(node.x,node.y,r,0,Math.PI*2);
-        if (node.nodeType==='normal') { ctx.fillStyle='rgba(45,212,191,0.2)'; ctx.fill(); }
+        if (node.nodeType === 'normal') { ctx.fillStyle='rgba(45,212,191,0.2)'; ctx.fill(); }
         ctx.strokeStyle=color; ctx.lineWidth=2; ctx.stroke();
 
-        if (node.nodeType==='attack') {
+        if (node.nodeType === 'attack') {
           const pr=r+4+Math.sin(node.pulsePhase*2)*4;
           ctx.beginPath(); ctx.arc(node.x,node.y,pr,0,Math.PI*2);
           ctx.strokeStyle=`rgba(239,68,68,${0.35+Math.sin(node.pulsePhase)*0.15})`;
+          ctx.lineWidth=1; ctx.stroke();
+        } else if (node.nodeType === 'protectedVictim') {
+          const pr=r+3+Math.sin(node.pulsePhase*2)*3;
+          ctx.beginPath(); ctx.arc(node.x,node.y,pr,0,Math.PI*2);
+          ctx.strokeStyle=`rgba(16,185,129,${0.35+Math.sin(node.pulsePhase)*0.15})`;
           ctx.lineWidth=1; ctx.stroke();
         }
 
@@ -249,7 +337,7 @@ export default function CanvasConsole({ wsUrl, replayEvents, isReplay, onEventLo
     return () => { ro.disconnect(); if (animRef.current) cancelAnimationFrame(animRef.current); };
   }, [zoneCenter]);
 
-  // WebSocket
+  // WebSocket & replay
   useEffect(() => {
     if (isReplay || !wsUrl) return;
     let ws: WebSocket|null=null;
@@ -266,7 +354,6 @@ export default function CanvasConsole({ wsUrl, replayEvents, isReplay, onEventLo
     return () => { ws?.close(); wsRef.current=null; };
   }, [wsUrl, isReplay, handleEvent]);
 
-  // Replay
   useEffect(() => {
     if (!isReplay || !replayEvents?.length) return;
     replayEvents.forEach((ev, i) => {

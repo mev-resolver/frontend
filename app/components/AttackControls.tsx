@@ -127,16 +127,25 @@ export default function AttackControls() {
 
       <div style={{borderTop:'1px solid rgba(55,65,81,0.5)', paddingTop:16}}>
         <div className="mono text-xs mb-3" style={{color:'#9CA3AF', letterSpacing:'0.1em'}}>AUTO ATTACK LOOP</div>
-        <div className="flex items-center gap-3 mb-3">
-          <span style={{color:'#9CA3AF', fontSize:12}}>Interval (sec)</span>
-          <input type="number" min={5} max={120} value={interval}
+        <div className="mb-3">
+          <div className="flex justify-between text-xs mb-1">
+            <span style={{color:'#9CA3AF'}}>Interval (seconds)</span>
+            <span style={{color:'#2DD4BF'}}>{interval} s</span>
+          </div>
+          <input
+            type="range"
+            min={5}
+            max={120}
+            step={1}
+            value={interval}
             onChange={e => setIntervalV(Number(e.target.value))}
             disabled={!configured}
             style={{
-              width:64, background:'#1F2937', border:'1px solid #374151',
-              color:'#F3F4F6', borderRadius:6, padding:'4px 8px',
-              fontFamily:'Space Mono,monospace', fontSize:12,
-            }} />
+              width: '100%',
+              accentColor: '#2DD4BF',
+              cursor: configured ? 'pointer' : 'not-allowed',
+            }}
+          />
         </div>
         <button
           onClick={toggleAuto}
